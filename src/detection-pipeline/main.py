@@ -85,6 +85,32 @@ def handle_incident(evidence_bundle: dict):
         json.dump(contract, f, indent=2)
 
     display_incident_card(contract)
+    dispatch_to_action_api(contract)
+
+
+def dispatch_to_action_api(contract: dict):
+    """Submits handover contract directly to the action-api gateway if running."""
+    import os
+    import requests
+    api_url = os.getenv("ACTION_API_URL", "http://127.0.0.1:8020")
+    agent_token = os.getenv("ACTION_AGENT_TOKEN", "test-agent-token")
+    try:
+        r = requests.get(f"{api_url}/health", timeout=1)
+        if r.status_code == 200:
+            sub = {
+                "request_id": f"req-{contract.get('incident_id')}-{int(time.time())}",
+                "dry_run": False,
+                "contract": contract
+            }
+            headers = {"Authorization": f"Bearer {agent_token}", "Content-Type": "application/json"}
+            post_r = requests.post(f"{api_url}/handovers", json=sub, headers=headers, timeout=5)
+            if post_r.status_code in [200, 201]:
+                print(f"[+] Dispatched handover to Action API gateway (Action ID: {post_r.json().get('id')}).")
+            else:
+                print(f"[-] Action API returned {post_r.status_code}: {post_r.text}")
+    except Exception:
+        # Action API not online; file-based handover is primary
+        pass
 
 
 def main():
