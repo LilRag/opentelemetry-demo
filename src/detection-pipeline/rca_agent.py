@@ -178,8 +178,14 @@ class RCAgent:
             elif act_type in ["START_CONTAINER", "RESTART_CONTAINER"]:
                 params.setdefault("container_name", target)
             elif act_type == "TOGGLE_FLAG":
-                params.setdefault("desired_variant", "off")
-                params.setdefault("flag_name", target)
+                active_flags = evidence_bundle.get("evidence", {}).get("active_chaos_flags", {})
+                flag = list(active_flags.keys())[0] if active_flags else (target if "Failure" in target or "Cpu" in target else f"{target}Failure")
+                act["target"] = flag
+                act["parameters"] = {
+                    "desired_variant": "off",
+                    "flag_name": flag,
+                    "api_endpoint": "http://localhost:8080/feature/api/write"
+                }
 
         ev = evidence_bundle.get("evidence", {})
         failing_spans = ev.get("traces", {}).get("failing_spans", [])
