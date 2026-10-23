@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faultctl"
+version = "0.1.0"
+description = "Inject and reset practice incidents in a local OpenTelemetry Demo (Incident Zero hackathon)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+faultctl = "faultctl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
