@@ -46,7 +46,7 @@ class Config:
     # ---------------------------------------------------------
     # 3. Cognitive LLM Settings
     # ---------------------------------------------------------
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini/gemini-3.8-flash")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini/gemini-3.5-flash")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "") or GEMINI_API_KEY
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
