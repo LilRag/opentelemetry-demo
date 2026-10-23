@@ -1,43 +1,62 @@
 {
-  "incident_id": "INC-1792755424",
+  "incident_id": "INC-1792756269",
   "status": "AWAITING_APPROVAL",
-  "timestamp": "2026-10-23T11:37:12Z",
+  "timestamp": "2026-10-23T11:51:17Z",
   "diagnosis": {
-    "culprit_service": "product-catalog",
-    "fault_type": "APPLICATION",
-    "root_cause": "Span 'resolveBoolean' failed with error: error evaluating flag with key cartMetricCardinalityOverflow.",
-    "blast_radius": "Upstream traffic depending on 'product-catalog' is degraded.",
-    "confidence_score": 0.95,
-    "evidence_summary": {
-      "metric_proof": "Symptom: HIGH_ERROR_RATE on product-catalog",
-      "failing_trace_id": "ab9c4421948088e82162cafbad6cb587",
+    "culprit_service": "payment",
+    "root_cause": "Chaos flag 'paymentFailure' is active at variant '50%' (Fail payment service charge requests n%).",
+    "blast_radius": "Directly impacts service 'payment' and its upstream caller chain.",
+    "evidence": {
+      "metric_proof": "Symptom: HIGH_ERROR_RATE on payment",
+      "failing_trace_id": "6baa3168caaea5b21664ba47dfb655a6",
       "failing_span": "resolveBoolean",
       "log_excerpt": "No error logs found in lookback window",
-      "flag_or_infra_state": "{'has_infra_anomaly': False, 'containers': [{'name': 'product-catalog', 'status': 'running', 'exit_code': 0, 'oom_killed': False}, {'name': 'astronomy-db', 'status': 'running', 'exit_code': 0, 'oom_killed': False}, {'name': 'valkey-cart', 'status': 'running', 'exit_code': 0, 'oom_killed': False}]}"
+      "container_inventory": [
+        {
+          "name": "payment",
+          "status": "running",
+          "exit_code": 0,
+          "oom_killed": false
+        },
+        {
+          "name": "astronomy-db",
+          "status": "running",
+          "exit_code": 0,
+          "oom_killed": false
+        },
+        {
+          "name": "valkey-cart",
+          "status": "running",
+          "exit_code": 0,
+          "oom_killed": false
+        }
+      ]
     }
   },
   "remediation_plan": {
-    "summary": "Restart service 'product-catalog' to recover from transient deadlock/failure.",
+    "summary": "Disable chaos flag 'paymentFailure' by setting defaultVariant to 'off' via Flagd REST API.",
     "actions": [
       {
         "step": 1,
-        "action_type": "RESTART_CONTAINER",
-        "target": "product-catalog",
+        "action_type": "TOGGLE_FLAG",
+        "target": "paymentFailure",
         "parameters": {
-          "container_name": "product-catalog"
+          "desired_variant": "off",
+          "flag_name": "paymentFailure",
+          "api_endpoint": "http://localhost:8080/feature/api/write"
         },
-        "description": "Restart service 'product-catalog' to recover from transient deadlock/failure."
+        "description": "Disable chaos flag 'paymentFailure' by setting defaultVariant to 'off' via Flagd REST API."
       },
       {
         "step": 2,
         "action_type": "VERIFY_RECOVERY",
-        "target": "product-catalog",
+        "target": "payment",
         "parameters": {
-          "metric_query": "sum(rate(http_requests_total{status=~'5..', service_name='product-catalog'}[1m]))",
+          "metric_query": "sum(rate(http_requests_total{status=~'5..', service_name='payment'}[1m]))",
           "expected_value": 0,
           "evaluation_window_seconds": 30
         },
-        "description": "Verify product-catalog 5xx error rate drops to 0% in Prometheus."
+        "description": "Verify payment 5xx error rate drops to 0% in Prometheus."
       }
     ]
   }

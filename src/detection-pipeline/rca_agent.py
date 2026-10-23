@@ -156,23 +156,29 @@ class RCAgent:
         ev = evidence_bundle.get("evidence", {})
         failing_spans = ev.get("traces", {}).get("failing_spans", [])
         logs = ev.get("logs", [])
-        active_flags = ev.get("active_chaos_flags", {})
         infra = ev.get("infrastructure", {})
 
-        return {
+        sample_trace = failing_spans[0].get("trace_id", "N/A") if failing_spans else "N/A"
+        sample_span = failing_spans[0].get("name", "N/A") if failing_spans else "N/A"
+        log_sample = logs[0] if logs else "No error logs found in lookback window"
+
+        contract = {
             "incident_id": incident_id,
+            "status": "AWAITING_APPROVAL",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "diagnosis": {
                 "culprit_service": culprit,
-                "fault_type": fault_type,
-                "confidence_score": float(confidence),
                 "root_cause": root_cause,
                 "blast_radius": blast_radius,
-                "evidence_summary": {
+                "evidence": {
                     "metric_proof": f"Symptom: {evidence_bundle.get('symptom', 'HIGH_ERROR_RATE')} on {service}",
-                    "failing_trace_id": failing_spans[0].get("trace_id") if failing_spans else None,
-                    "failing_span": failing_spans[0].get("name") if failing_spans else None,
-                    "log_excerpt": logs[0] if logs else "No error logs found in lookback window",
-                    "flag_or_infra_state": active_flags if active_flags else infra
+                    "failing_trace_id": sample_trace,
+                    "failing_span": sample_span,
+                    "log_excerpt": log_sample,
+                    "container_inventory": [
+                        {"name": c.get("name"), "status": c.get("status"), "exit_code": c.get("exit_code"), "oom_killed": c.get("oom_killed")}
+                        for c in infra.get("containers", [])
+                    ]
                 }
             },
             "remediation_plan": {
@@ -180,6 +186,22 @@ class RCAgent:
                 "actions": actions
             }
         }
+        self._validate_contract(contract)
+        return contract
+
+    def _validate_contract(self, contract: Dict[str, Any]):
+        """Validates contract against action-api Pydantic model if available."""
+        try:
+            import sys
+            from pathlib import Path
+            api_path = str(Path(__file__).resolve().parent.parent.parent / "action-api")
+            if api_path not in sys.path:
+                sys.path.insert(0, api_path)
+            from handover import HandoverContract
+            HandoverContract.model_validate(contract)
+            print("[+] Verified contract against action-api HandoverContract.")
+        except Exception as e:
+            print(f"[-] Contract validation warning: {e}")
 
     def _generate_forensic_contract(self, evidence_bundle: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -217,6 +239,7 @@ class RCAgent:
                 "target": flag_name,
                 "parameters": {
                     "desired_variant": "off",
+                    "flag_name": flag_name,
                     "api_endpoint": "http://localhost:8080/feature/api/write"
                 },
                 "description": f"Disable chaos flag '{flag_name}' by setting defaultVariant to 'off' via Flagd REST API."
@@ -284,22 +307,23 @@ class RCAgent:
         sample_span = failing_spans[0].get("name", "N/A") if failing_spans else "N/A"
         log_sample = logs[0] if logs else "No error logs found in lookback window"
 
-        return {
+        contract = {
             "incident_id": incident_id,
             "status": "AWAITING_APPROVAL",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "diagnosis": {
                 "culprit_service": culprit,
-                "fault_type": fault_type,
                 "root_cause": root_cause,
                 "blast_radius": blast_radius,
-                "confidence_score": 0.95,
-                "evidence_summary": {
+                "evidence": {
                     "metric_proof": f"Symptom: {symptom} on {service}",
                     "failing_trace_id": sample_trace,
                     "failing_span": sample_span,
                     "log_excerpt": log_sample,
-                    "flag_or_infra_state": str(active_flags if active_flags else infra)
+                    "container_inventory": [
+                        {"name": c.get("name"), "status": c.get("status"), "exit_code": c.get("exit_code"), "oom_killed": c.get("oom_killed")}
+                        for c in infra.get("containers", [])
+                    ]
                 }
             },
             "remediation_plan": {
@@ -307,3 +331,5 @@ class RCAgent:
                 "actions": actions
             }
         }
+        self._validate_contract(contract)
+        return contract
