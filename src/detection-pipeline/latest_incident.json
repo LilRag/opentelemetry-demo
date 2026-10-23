@@ -1,0 +1,45 @@
+{
+  "incident_id": "INC-1792752282",
+  "status": "AWAITING_APPROVAL",
+  "timestamp": "2026-10-23T10:44:52Z",
+  "diagnosis": {
+    "culprit_service": "checkout",
+    "fault_type": "APPLICATION",
+    "root_cause": "Chaos flag 'paymentFailure' is active at variant '100%' ().",
+    "blast_radius": "Directly impacts service 'checkout' and its upstream caller chain.",
+    "confidence_score": 0.95,
+    "evidence_summary": {
+      "metric_proof": "Symptom: HIGH_ERROR_RATE on checkout",
+      "failing_trace_id": "N/A",
+      "failing_span": "N/A",
+      "log_excerpt": "No error logs found in lookback window",
+      "flag_or_infra_state": "{'paymentFailure': {'active_variant': '100%', 'description': ''}}"
+    }
+  },
+  "remediation_plan": {
+    "summary": "Disable chaos flag 'paymentFailure' by setting defaultVariant to 'off' via Flagd REST API.",
+    "actions": [
+      {
+        "step": 1,
+        "action_type": "TOGGLE_FLAG",
+        "target": "paymentFailure",
+        "parameters": {
+          "desired_variant": "off",
+          "api_endpoint": "http://localhost:8080/feature/api/write"
+        },
+        "description": "Disable chaos flag 'paymentFailure' by setting defaultVariant to 'off' via Flagd REST API."
+      },
+      {
+        "step": 2,
+        "action_type": "VERIFY_RECOVERY",
+        "target": "checkout",
+        "parameters": {
+          "metric_query": "sum(rate(http_requests_total{status=~'5..', service_name='checkout'}[1m]))",
+          "expected_value": 0,
+          "evaluation_window_seconds": 30
+        },
+        "description": "Verify checkout 5xx error rate drops to 0% in Prometheus."
+      }
+    ]
+  }
+}
