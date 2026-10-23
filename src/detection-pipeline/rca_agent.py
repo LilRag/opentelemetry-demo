@@ -8,50 +8,53 @@ import requests
 
 from config import config
 
-SYSTEM_PROMPT = """You are an expert SRE for the OpenTelemetry Astronomy Shop.
+SYSTEM_PROMPT = """You are a Principal Site Reliability Engineer (SRE) for the OpenTelemetry Astronomy Shop microservices platform.
 Analyze the Telemetry Evidence Bundle and output ONLY a valid JSON Remediation Handover Contract conforming to this EXACT schema:
 {
   "incident_overview": {
     "incident_id": "<from evidence>",
-    "target_service": "<target_service>",
+    "target_service": "<one of: payment, cart, checkout, product-catalog, recommendation, ad, email, shipping, currency, frontend>",
     "detected_symptom": "<symptom>",
     "timestamp": "<iso timestamp>"
   },
   "classification": {
     "fault_type": "APPLICATION" | "INFRASTRUCTURE" | "CONFIG_CHAOS_FLAG" | "RESOURCE",
     "confidence_score": 0.95,
-    "culprit_entity": "<service, container, or flag name>",
-    "root_cause_summary": "<detailed root cause explanation>",
-    "blast_radius": "<impacted downstream services>"
+    "culprit_service": "<the actual microservice name, e.g. payment>",
+    "root_cause_summary": "<Professional SRE diagnosis explaining the technical failure mode: which specific gRPC/HTTP method failed, what error was observed in traces/metrics, and why>",
+    "blast_radius": "<impacted upstream caller services, e.g. checkout, frontend>"
   },
   "forensic_evidence": {
     "metric_proof": "<metric anomaly description>",
     "failing_trace_id": "<traceId if any>",
     "failing_span": "<span name if any>",
     "log_excerpt": "<error log message if any>",
-    "flag_or_infra_state": "<flag or container anomaly info>"
+    "infrastructure_health": []
   },
   "remediation_plan": {
-    "summary": "<one sentence remediation summary>",
+    "summary": "<actionable remediation summary>",
     "actions": [
       {
         "step": 1,
-        "action_type": "DISABLE_FEATURE_FLAG" | "START_CONTAINER" | "RESTART_CONTAINER" | "ROLLBACK_DEPLOYMENT",
-        "target": "<target name>",
+        "action_type": "TOGGLE_FLAG" | "START_CONTAINER" | "RESTART_CONTAINER",
+        "target": "<flag name or container name>",
         "parameters": {},
         "description": "<action description>"
       },
       {
         "step": 2,
         "action_type": "VERIFY_RECOVERY",
-        "target": "<target name>",
-        "parameters": {"evaluation_window_seconds": 30},
+        "target": "<service name>",
+        "parameters": {"metric_query": "...", "expected_value": 0, "evaluation_window_seconds": 30},
         "description": "Verify error rate drops to 0% in Prometheus."
       }
     ]
   }
 }
-Output ONLY the JSON object. Do not wrap in markdown or include commentary."""
+CRITICAL SRE RULES:
+1. culprit_service must ALWAYS be the microservice name (e.g. 'payment', 'cart'), NEVER a flag name like 'paymentFailure'.
+2. root_cause_summary must describe the actual technical transaction failure (e.g. 'Payment service Charge transactions are intermittently failing with error status, triggered by configuration flag paymentFailure set to 50% rejection rate').
+Output ONLY the JSON object without markdown formatting."""
 
 
 class RCAgent:
@@ -115,24 +118,30 @@ class RCAgent:
         incident_id = parsed.get("incident_id") or parsed.get("incident_overview", {}).get("incident_id") or evidence_bundle.get("incident_id", f"INC-{int(time.time())}")
         service = parsed.get("target_service") or parsed.get("incident_overview", {}).get("target_service") or evidence_bundle.get("target_service", "unknown")
 
+        # Guarantee culprit is a valid microservice name, never a flag name
+        known_services = ["payment", "cart", "checkout", "product-catalog", "recommendation", "ad", "email", "frontend", "shipping", "currency", "accounting", "fraud-detection"]
+        raw_service = evidence_bundle.get("target_service") or service
+        culprit = raw_service
+        for ks in known_services:
+            if ks in raw_service.lower():
+                culprit = ks
+                break
+
         classification = parsed.get("classification", {})
         if isinstance(classification, str):
             fault_type = classification
             root_cause = parsed.get("root_cause") or parsed.get("root_cause_summary") or f"Issue detected on {service}"
             blast_radius = parsed.get("blast_radius") or f"Upstream traffic depending on {service} is affected"
-            culprit = parsed.get("culprit_entity", service)
             confidence = parsed.get("confidence_score", 0.95)
         elif isinstance(classification, dict):
             fault_type = classification.get("fault_type") or parsed.get("fault_type", "APPLICATION")
             root_cause = classification.get("root_cause_summary") or parsed.get("root_cause") or f"Issue detected on {service}"
             blast_radius = classification.get("blast_radius") or f"Upstream traffic depending on {service} is affected"
-            culprit = classification.get("culprit_entity") or service
             confidence = classification.get("confidence_score", 0.95)
         else:
             fault_type = "APPLICATION"
             root_cause = parsed.get("root_cause", f"Issue detected on {service}")
             blast_radius = parsed.get("blast_radius", f"Upstream traffic depending on {service} is affected")
-            culprit = service
             confidence = 0.90
 
         plan = parsed.get("remediation_plan", {})
