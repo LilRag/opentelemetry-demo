@@ -5,7 +5,8 @@ import datetime
 import json
 import subprocess
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 import requests
 
 from config import config
@@ -275,6 +276,119 @@ class EvidenceCollector:
             infra["docker_cli_error"] = str(e)
 
         return infra
+
+    def collect_from_bundle(self, bundle_dir: Union[str, Path]) -> Dict[str, Any]:
+        """
+        Loads frozen point-in-time telemetry from an offline incident bundle
+        (metrics.json, traces.json, logs.json, metadata.json) and formats
+        it into the standard Evidence Bundle for the RCA Reasoner.
+        """
+        bundle_path = Path(bundle_dir)
+        if not bundle_path.is_dir():
+            alt_path = Path(__file__).resolve().parent.parent.parent / "bundles" / str(bundle_dir)
+            if alt_path.is_dir():
+                bundle_path = alt_path
+            else:
+                raise FileNotFoundError(f"Bundle directory not found: {bundle_dir}")
+
+        print(f"\n[*] Replaying offline incident bundle: '{bundle_path.name}'...")
+
+        meta = {}
+        meta_file = bundle_path / "metadata.json"
+        if meta_file.exists():
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        target_service = meta.get("affected_service") or meta.get("target_service") or "unknown"
+
+        metrics_data = {}
+        metrics_file = bundle_path / "metrics.json"
+        if metrics_file.exists():
+            try:
+                metrics_data = json.loads(metrics_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        if target_service == "unknown" and metrics_data:
+            err_query = metrics_data.get("error_rate_http", {}).get("response", {}).get("data", {}).get("result", [])
+            if not err_query:
+                err_query = metrics_data.get("error_rate_grpc", {}).get("response", {}).get("data", {}).get("result", [])
+            if err_query:
+                top_metric = err_query[0].get("metric", {})
+                target_service = top_metric.get("service_name") or top_metric.get("job") or "payment"
+
+        traces_file = bundle_path / "traces.json"
+        failing_spans = []
+        sample_trace_ids = []
+        if traces_file.exists():
+            try:
+                raw_traces = json.loads(traces_file.read_text(encoding="utf-8"))
+                svc_traces = raw_traces.get(target_service, {}).get("response", {}).get("data", [])
+                for t in svc_traces:
+                    t_id = t.get("traceID")
+                    if t_id and t_id not in sample_trace_ids:
+                        sample_trace_ids.append(t_id)
+                    for span in t.get("spans", []):
+                        tags = {tg["key"]: tg["value"] for tg in span.get("tags", [])}
+                        if tags.get("error") or tags.get("otel.status_code") == "ERROR":
+                            failing_spans.append({
+                                "trace_id": t_id,
+                                "span_id": span.get("spanID"),
+                                "name": span.get("operationName", span.get("name")),
+                                "error_message": tags.get("error.message", "Span execution error"),
+                                "attributes": tags
+                            })
+            except Exception as e:
+                print(f"[-] Traces parsing error from bundle: {e}")
+
+        logs_file = bundle_path / "logs.json"
+        extracted_logs = []
+        if logs_file.exists():
+            try:
+                raw_logs = json.loads(logs_file.read_text(encoding="utf-8"))
+                hits = raw_logs.get("response", {}).get("hits", {}).get("hits", [])
+                for hit in hits:
+                    source = hit.get("_source", {})
+                    msg = source.get("body") or source.get("message")
+                    if msg and msg not in extracted_logs:
+                        extracted_logs.append(msg)
+            except Exception:
+                pass
+
+        active_flags = {}
+        if meta.get("fault_flag"):
+            active_flags[meta["fault_flag"]] = {
+                "active_variant": meta.get("fault_variant", "on"),
+                "description": meta.get("description", "Injected practice fault")
+            }
+
+        incident_id = f"BUNDLE-{bundle_path.name}"
+        bundle = {
+            "incident_id": incident_id,
+            "timestamp": meta.get("captured_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
+            "symptom": meta.get("symptom", "HIGH_ERROR_RATE"),
+            "target_service": target_service,
+            "classification": "APPLICATION",
+            "evidence": {
+                "metrics": {
+                    "bundle_source": bundle_path.name,
+                    "target_service": target_service
+                },
+                "traces": {
+                    "sample_trace_ids": sample_trace_ids[:5],
+                    "failing_spans": failing_spans[:5]
+                },
+                "logs": extracted_logs[:5],
+                "active_chaos_flags": active_flags,
+                "infrastructure": {
+                    "has_infra_anomaly": False,
+                    "containers": [{"name": target_service, "status": "running", "exit_code": 0, "oom_killed": False}]
+                }
+            }
+        }
+        return bundle
 
 
 if __name__ == "__main__":

@@ -122,9 +122,24 @@ def main():
     parser.add_argument("--reset-all", action="store_true", help="Reset all active faults via faultctl")
     parser.add_argument("--list-faults", action="store_true", help="List all cataloged practice faults in faultctl")
     parser.add_argument("--auto-reset", action="store_true", help="Automatically reset injected fault after detection test finishes")
+    parser.add_argument("--bundle", type=str, metavar="BUNDLE", help="Replay and perform RCA on an offline telemetry bundle from bundles/")
+    parser.add_argument("--capture-bundle", type=str, metavar="NAME", help="Snapshot active live incident telemetry into bundles/<NAME>")
     args = parser.parse_args()
 
     config.display()
+
+    if args.capture_bundle:
+        import subprocess
+        script = PROJECT_ROOT / "scripts" / "capture_bundle.py"
+        print(f"[*] Capturing live incident telemetry into: bundles/{args.capture_bundle}...")
+        subprocess.run([sys.executable, str(script), "--name", args.capture_bundle], cwd=str(PROJECT_ROOT))
+        return
+
+    if args.bundle:
+        collector = EvidenceCollector()
+        bundle = collector.collect_from_bundle(args.bundle)
+        handle_incident(bundle)
+        return
 
     if args.list_faults:
         run_faultctl("list")

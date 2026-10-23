@@ -1,0 +1,24 @@
+{
+  "incident_id": "incident_01_payment_failure",
+  "captured_at": "2026-10-23T12:04:46.093611+00:00",
+  "active_faults_at_capture": {},
+  "fault_name": "paymentFailure",
+  "fault_variant": "50%",
+  "fault_flag": "paymentFailure",
+  "affected_service": "payment",
+  "fault_type": "application",
+  "correct_diagnosis": "Payment service fails 50% of charge requests due to active chaos feature flag paymentFailure.",
+  "correct_fix": {
+    "action": "TOGGLE_FLAG",
+    "parameters": {
+      "flag": "paymentFailure",
+      "variant": "off"
+    }
+  },
+  "notes": "Simulated practice fault on payment service",
+  "endpoints": {
+    "prometheus": "http://localhost:9090",
+    "jaeger": "http://localhost:16686",
+    "opensearch": "http://localhost:59254"
+  }
+}

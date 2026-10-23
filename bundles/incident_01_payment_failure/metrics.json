@@ -1,0 +1,101 @@
+{
+  "error_rate_grpc": {
+    "query": "rate(rpc_server_duration_count{status_code=\"STATUS_CODE_ERROR\"}[5m])",
+    "captured_at": "2026-10-23T12:04:31.561708+00:00",
+    "response": {
+      "status": "success",
+      "data": {
+        "resultType": "vector",
+        "result": []
+      }
+    }
+  },
+  "error_rate_http": {
+    "query": "rate(http_server_request_duration_count{http_response_status_code=~\"5..\"}[5m])",
+    "captured_at": "2026-10-23T12:04:31.569123+00:00",
+    "response": {
+      "status": "success",
+      "data": {
+        "resultType": "vector",
+        "result": []
+      }
+    }
+  },
+  "latency_p99": {
+    "query": "histogram_quantile(0.99, rate(rpc_server_duration_bucket[5m]))",
+    "captured_at": "2026-10-23T12:04:31.573369+00:00",
+    "response": {
+      "status": "success",
+      "data": {
+        "resultType": "vector",
+        "result": []
+      }
+    }
+  },
+  "latency_p95": {
+    "query": "histogram_quantile(0.95, rate(rpc_server_duration_bucket[5m]))",
+    "captured_at": "2026-10-23T12:04:31.591789+00:00",
+    "response": {
+      "status": "success",
+      "data": {
+        "resultType": "vector",
+        "result": []
+      }
+    }
+  },
+  "memory_usage": {
+    "query": "container_memory_usage_bytes",
+    "captured_at": "2026-10-23T12:04:31.596023+00:00",
+    "response": {
+      "status": "success",
+      "data": {
+        "resultType": "vector",
+        "result": []
+      }
+    }
+  },
+  "cpu_usage": {
+    "query": "rate(container_cpu_usage_seconds_total[5m])",
+    "captured_at": "2026-10-23T12:04:31.600156+00:00",
+    "response": {
+      "status": "success",
+      "data": {
+        "resultType": "vector",
+        "result": []
+      }
+    }
+  },
+  "request_rate": {
+    "query": "rate(rpc_server_duration_count[5m])",
+    "captured_at": "2026-10-23T12:04:31.603868+00:00",
+    "response": {
+      "status": "success",
+      "data": {
+        "resultType": "vector",
+        "result": []
+      }
+    }
+  },
+  "kafka_consumer_lag": {
+    "query": "kafka_consumer_group_lag",
+    "captured_at": "2026-10-23T12:04:31.608261+00:00",
+    "response": {
+      "status": "success",
+      "data": {
+        "resultType": "vector",
+        "result": []
+      }
+    }
+  },
+  "container_last_seen": {
+    "query": "container_last_seen{name!=\"\"}",
+    "captured_at": "2026-10-23T12:04:31.614483+00:00",
+    "response": {
+      "status": "success",
+      "data": {
+        "resultType": "vector",
+        "result": []
+      }
+    }
+  }
+}

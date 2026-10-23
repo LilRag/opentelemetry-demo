@@ -153,6 +153,25 @@ class RCAgent:
         else:
             summary = "Perform automated mitigation."
 
+        # Ensure parameters for all action steps satisfy HandoverStep schema
+        for act in actions:
+            act_type = act.get("action_type")
+            if act_type in ["DISABLE_FEATURE_FLAG", "ENABLE_FEATURE_FLAG"]:
+                act["action_type"] = "TOGGLE_FLAG"
+                act_type = "TOGGLE_FLAG"
+            target = act.get("target") or culprit
+            act["target"] = target
+            params = act.setdefault("parameters", {})
+            if act_type == "VERIFY_RECOVERY":
+                params.setdefault("metric_query", f"sum(rate(http_requests_total{{status=~'5..', service_name='{target}'}}[1m]))")
+                params.setdefault("expected_value", 0)
+                params.setdefault("evaluation_window_seconds", 30)
+            elif act_type in ["START_CONTAINER", "RESTART_CONTAINER"]:
+                params.setdefault("container_name", target)
+            elif act_type == "TOGGLE_FLAG":
+                params.setdefault("desired_variant", "off")
+                params.setdefault("flag_name", target)
+
         ev = evidence_bundle.get("evidence", {})
         failing_spans = ev.get("traces", {}).get("failing_spans", [])
         logs = ev.get("logs", [])

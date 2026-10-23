@@ -1,0 +1,62 @@
+{
+  "captured_at": "2026-10-23T12:04:46.093611+00:00",
+  "query": {
+    "query": {
+      "bool": {
+        "must": [
+          {
+            "range": {
+              "@timestamp": {
+                "gte": "now-15m"
+              }
+            }
+          },
+          {
+            "terms": {
+              "severity_text": [
+                "ERROR",
+                "WARN",
+                "error",
+                "warn"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "sort": [
+      {
+        "@timestamp": {
+          "order": "desc"
+        }
+      }
+    ],
+    "size": 200,
+    "_source": [
+      "@timestamp",
+      "severity_text",
+      "body",
+      "service.name",
+      "trace_id",
+      "span_id"
+    ]
+  },
+  "response": {
+    "took": 283,
+    "timed_out": false,
+    "_shards": {
+      "total": 1,
+      "successful": 1,
+      "skipped": 0,
+      "failed": 0
+    },
+    "hits": {
+      "total": {
+        "value": 0,
+        "relation": "eq"
+      },
+      "max_score": null,
+      "hits": []
+    }
+  }
+}

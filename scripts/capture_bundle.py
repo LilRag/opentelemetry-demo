@@ -28,12 +28,23 @@ from pathlib import Path
 
 import requests
 
-# ---------------------------------------------------------------------------
-# Endpoint config — use localhost since we run this from the host machine
-# ---------------------------------------------------------------------------
+import subprocess
+
+def _resolve_opensearch():
+    if os.getenv("OPENSEARCH_URL"):
+        return os.getenv("OPENSEARCH_URL")
+    try:
+        out = subprocess.check_output("docker port opensearch 9200", shell=True, text=True).strip()
+        if ":" in out:
+            return f"http://localhost:{out.split(':')[-1].strip()}"
+    except Exception:
+        pass
+    return "http://localhost:9200"
+
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 JAEGER_URL = os.getenv("JAEGER_URL", "http://localhost:16686")
-OPENSEARCH_URL = os.getenv("OPENSEARCH_URL", "http://localhost:9200")
+OPENSEARCH_URL = _resolve_opensearch()
+JAEGER_V3_URL = os.getenv("JAEGER_V3_URL", "http://localhost:8080/jaeger/ui/api/v3/traces")
 
 BUNDLES_DIR = Path(__file__).parent.parent / "bundles"
 
@@ -89,7 +100,7 @@ TRACE_SERVICES = [
 # ---------------------------------------------------------------------------
 
 def capture_prometheus(bundle_path: Path) -> bool:
-    print("\n  📊 Capturing Prometheus metrics...")
+    print("\n  [*] Capturing Prometheus metrics...")
     results = {}
     failed = []
 
@@ -107,82 +118,88 @@ def capture_prometheus(bundle_path: Path) -> bool:
                 "response": r.json(),
             }
             count = len(r.json().get("data", {}).get("result", []))
-            print(f"    ✓ {name:<35} ({count} series)")
+            print(f"    [+] {name:<35} ({count} series)")
         except requests.exceptions.ConnectionError:
             failed.append(name)
-            print(f"    ✗ {name:<35} (connection refused — is Prometheus running?)")
+            print(f"    [-] {name:<35} (connection refused -- is Prometheus running?)")
         except Exception as e:
             failed.append(name)
-            print(f"    ✗ {name:<35} ({e})")
+            print(f"    [-] {name:<35} ({e})")
 
     out_file = bundle_path / "metrics.json"
     with open(out_file, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"  → Saved to {out_file}")
+    print(f"  -> Saved to {out_file}")
 
     if failed:
-        print(f"  ⚠  {len(failed)} queries failed: {failed}")
+        print(f"  [!] {len(failed)} queries failed: {failed}")
     return len(failed) < len(PROMETHEUS_QUERIES)
 
 
 def capture_jaeger(bundle_path: Path) -> bool:
-    print("\n  🔍 Capturing Jaeger traces...")
+    print("\n  [*] Capturing Jaeger traces...")
     results = {}
     failed = []
 
-    # First get the list of known services from Jaeger itself
+    use_v3_proxy = False
     try:
-        svc_resp = requests.get(f"{JAEGER_URL}/api/services", timeout=10)
+        svc_resp = requests.get(f"{JAEGER_URL}/api/services", timeout=2)
         jaeger_services = svc_resp.json().get("data", [])
     except Exception:
+        use_v3_proxy = True
         jaeger_services = TRACE_SERVICES
-        print("    ⚠  Could not fetch service list from Jaeger, using defaults")
+        print("    [!] Jaeger 16686 not exposed directly; routing via Envoy proxy (port 8080)")
+
+    now = datetime.now(timezone.utc)
+    start = now - datetime.timedelta(hours=1) if hasattr(datetime, "timedelta") else now
 
     # Query traces for each service
     for svc in TRACE_SERVICES:
         try:
-            r = requests.get(
-                f"{JAEGER_URL}/api/traces",
-                params={
-                    "service": svc,
-                    "limit": 30,
-                    "lookback": "1h",
-                },
-                timeout=15,
-            )
-            r.raise_for_status()
-            data = r.json()
-            trace_count = len(data.get("data", []))
+            if not use_v3_proxy:
+                r = requests.get(
+                    f"{JAEGER_URL}/api/traces",
+                    params={"service": svc, "limit": 20, "lookback": "1h"},
+                    timeout=3,
+                )
+                r.raise_for_status()
+                data = r.json()
+            else:
+                r = requests.get(
+                    JAEGER_V3_URL,
+                    params={
+                        "query.serviceName": svc,
+                        "query.limit": 20,
+                        "query.startTimeMin": (now.replace(hour=max(0, now.hour-1))).isoformat(),
+                        "query.startTimeMax": now.isoformat(),
+                    },
+                    timeout=3,
+                )
+                data = r.json() if r.status_code == 200 else {"result": {"resourceSpans": []}}
+
+            trace_count = len(data.get("data", [])) or len(data.get("result", {}).get("resourceSpans", []))
             results[svc] = {
                 "service": svc,
                 "captured_at": datetime.now(timezone.utc).isoformat(),
                 "response": data,
             }
-            # Count error traces
-            error_traces = 0
-            for trace in data.get("data", []):
-                for span in trace.get("spans", []):
-                    tags = {t["key"]: t["value"] for t in span.get("tags", [])}
-                    if tags.get("error") or tags.get("otel.status_code") == "ERROR":
-                        error_traces += 1
-                        break
-            print(f"    ✓ {svc:<20} {trace_count} traces, {error_traces} with errors")
+            print(f"    [+] {svc:<20} {trace_count} traces captured")
         except requests.exceptions.ConnectionError:
             failed.append(svc)
-            print(f"    ✗ {svc:<20} (connection refused — is Jaeger running?)")
+            print(f"    [-] {svc:<20} (connection refused)")
         except Exception as e:
             failed.append(svc)
-            print(f"    ✗ {svc:<20} ({e})")
+            print(f"    [-] {svc:<20} ({e})")
 
     out_file = bundle_path / "traces.json"
     with open(out_file, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"  → Saved to {out_file}")
+    print(f"  -> Saved to {out_file}")
     return len(failed) < len(TRACE_SERVICES)
 
 
 def capture_logs(bundle_path: Path) -> bool:
-    print("\n  📋 Capturing OpenSearch logs...")
+    print("\n  [*] Capturing OpenSearch logs...")
 
     # Capture ERROR logs from all services in the last 15 minutes
     query = {
@@ -216,7 +233,7 @@ def capture_logs(bundle_path: Path) -> bool:
         r.raise_for_status()
         result = r.json()
         hit_count = result.get("hits", {}).get("total", {}).get("value", 0)
-        print(f"    ✓ Found {hit_count} error/warn log entries")
+        print(f"    [+] Found {hit_count} error/warn log entries")
 
         out_file = bundle_path / "logs.json"
         with open(out_file, "w") as f:
@@ -229,18 +246,18 @@ def capture_logs(bundle_path: Path) -> bool:
                 f,
                 indent=2,
             )
-        print(f"  → Saved to {out_file}")
+        print(f"  -> Saved to {out_file}")
         return True
 
     except requests.exceptions.ConnectionError:
-        print(f"    ✗ Cannot connect to OpenSearch at {OPENSEARCH_URL}")
+        print(f"    [-] Cannot connect to OpenSearch at {OPENSEARCH_URL}")
         # Save empty placeholder so bundle is still usable
         out_file = bundle_path / "logs.json"
         with open(out_file, "w") as f:
             json.dump({"error": "OpenSearch unavailable", "logs": []}, f, indent=2)
         return False
     except Exception as e:
-        print(f"    ✗ Log capture failed: {e}")
+        print(f"    [-] Log capture failed: {e}")
         return False
 
 
@@ -283,7 +300,7 @@ def write_metadata(bundle_path: Path, bundle_name: str):
     out_file = bundle_path / "metadata.json"
     with open(out_file, "w") as f:
         json.dump(metadata, f, indent=2)
-    print(f"  → Saved to {out_file}")
+    print(f"  -> Saved to {out_file}")
     return active_faults
 
 
@@ -327,9 +344,9 @@ def main():
     for name, url in [("Prometheus", PROMETHEUS_URL), ("Jaeger", JAEGER_URL), ("OpenSearch", OPENSEARCH_URL)]:
         try:
             requests.get(url, timeout=3)
-            print(f"    ✓ {name} reachable at {url}")
+            print(f"    [+] {name} reachable at {url}")
         except Exception:
-            print(f"    ✗ {name} NOT reachable at {url}")
+            print(f"    [-] {name} NOT reachable at {url}")
 
     # Capture each telemetry source
     if not args.skip_prometheus:
@@ -342,24 +359,24 @@ def main():
         capture_logs(bundle_path)
 
     # Write metadata
-    print("\n  📝 Writing metadata...")
+    print("\n  [*] Writing metadata...")
     active_faults = write_metadata(bundle_path, args.name)
 
     print(f"\n{'='*60}")
-    print(f"  ✅ Bundle captured: bundles/{args.name}/")
-    print(f"     metrics.json  — Prometheus snapshots")
-    print(f"     traces.json   — Jaeger traces")
-    print(f"     logs.json     — OpenSearch error logs")
-    print(f"     metadata.json — Ground truth (edit this!)")
+    print(f"  [+] Bundle captured: bundles/{args.name}/")
+    print(f"     metrics.json  -- Prometheus snapshots")
+    print(f"     traces.json   -- Jaeger traces")
+    print(f"     logs.json     -- OpenSearch error logs")
+    print(f"     metadata.json -- Ground truth (edit this!)")
 
     if active_faults:
         print(f"\n  Active faults detected at capture time:")
         for name, variant in active_faults.items():
             print(f"    {name} = {variant}")
-        print(f"\n  ✏️  Open bundles/{args.name}/metadata.json")
+        print(f"\n  [*] Open bundles/{args.name}/metadata.json")
         print(f"      Fill in: affected_service, correct_diagnosis, correct_fix")
     else:
-        print(f"\n  ⚠️  No active faults detected in flagd.")
+        print(f"\n  [!] No active faults detected in flagd.")
         print(f"      Make sure you inject a fault BEFORE capturing.")
 
     print(f"{'='*60}\n")
