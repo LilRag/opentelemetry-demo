@@ -131,6 +131,9 @@ class EvidenceCollector:
     # ------------------------------------------------------------------
     # 2. Jaeger Traces Collection (Jaeger v3 API)
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 2. Jaeger Traces Collection (Jaeger v3 API)
+    # ------------------------------------------------------------------
     def _collect_traces(self, service: str) -> Tuple[List[str], List[Dict[str, Any]]]:
         trace_ids = []
         failing_spans = []
@@ -143,12 +146,17 @@ class EvidenceCollector:
                 "query.startTimeMin": start.isoformat(),
                 "query.startTimeMax": now.isoformat(),
                 "query.serviceName": service,
-                "query.limit": 3
+                "query.limit": 20
             }
             resp = requests.get(self.jaeger_url, params=params, timeout=5).json()
             resource_spans = resp.get("result", {}).get("resourceSpans", [])
 
             for rs in resource_spans:
+                rs_service = None
+                for attr in rs.get("resource", {}).get("attributes", []):
+                    if attr.get("key") == "service.name":
+                        rs_service = attr.get("value", {}).get("stringValue")
+
                 scope_spans = rs.get("scopeSpans", [])
                 for ss in scope_spans:
                     for span in ss.get("spans", []):
@@ -156,16 +164,44 @@ class EvidenceCollector:
                         if t_id and t_id not in trace_ids:
                             trace_ids.append(t_id)
 
-                        # Check if span has an error status
+                        span_name = span.get("name", "")
+                        # Ignore benign streaming / background event loops
+                        if "EventStream" in span_name:
+                            continue
+
+                        # Extract exception event if present (standard OpenTelemetry exception recording)
+                        exc_msg = None
+                        exc_type = None
+                        for ev in span.get("events", []):
+                            if ev.get("name") == "exception":
+                                for attr in ev.get("attributes", []):
+                                    k = attr.get("key")
+                                    v = attr.get("value", {}).get("stringValue")
+                                    if k == "exception.message":
+                                        exc_msg = v
+                                    elif k == "exception.type":
+                                        exc_type = v
+
                         status = span.get("status", {})
-                        if status.get("code") in [2, "STATUS_CODE_ERROR"]:
-                            failing_spans.append({
+                        status_code = status.get("code")
+                        is_error = status_code in [2, "STATUS_CODE_ERROR"] or exc_msg is not None
+
+                        if is_error:
+                            err_msg = exc_msg or status.get("message") or "Error status"
+                            entry = {
                                 "trace_id": t_id,
                                 "span_id": span.get("spanId"),
-                                "name": span.get("name"),
-                                "error_message": status.get("message", "Error status"),
+                                "service": rs_service or service,
+                                "name": span_name,
+                                "error_message": err_msg,
+                                "exception_type": exc_type,
                                 "attributes": span.get("attributes", [])
-                            })
+                            }
+                            # Prioritize errors occurring directly on target service or business endpoints
+                            if rs_service == service or "Charge" in span_name or "PlaceOrder" in span_name:
+                                failing_spans.insert(0, entry)
+                            else:
+                                failing_spans.append(entry)
 
         except Exception as e:
             failing_spans.append({"query_error": f"Failed to query Jaeger: {e}"})
@@ -178,18 +214,40 @@ class EvidenceCollector:
     def _collect_logs(self, service: str, trace_ids: List[str]) -> List[str]:
         logs = []
         try:
-            should_clauses = [{"match": {"service.name": service}}]
-            for tid in trace_ids[:3]:
-                should_clauses.append({"match": {"trace_id": tid}})
+            should_service = [
+                {"match": {"resource.service.name": service}},
+                {"match": {"attributes.service.name": service}}
+            ]
+            for tid in trace_ids[:5]:
+                should_service.append({"match": {"traceId": tid}})
+                should_service.append({"match": {"trace_id": tid}})
 
             query_body = {
                 "query": {
                     "bool": {
-                        "should": should_clauses,
-                        "must": [{"match": {"severity_text": "ERROR"}}]
+                        "should": should_service,
+                        "minimum_should_match": 1,
+                        "must": [
+                            {
+                                "bool": {
+                                    "should": [
+                                        {"range": {"severity.number": {"gte": 13}}},
+                                        {"match": {"severity.text": "warn"}},
+                                        {"match": {"severity.text": "error"}},
+                                        {"match": {"severity.text": "fatal"}},
+                                        {"wildcard": {"body": "*fail*"}},
+                                        {"wildcard": {"body": "*error*"}},
+                                        {"wildcard": {"body": "*exception*"}},
+                                        {"wildcard": {"body": "*invalid*"}}
+                                    ],
+                                    "minimum_should_match": 1
+                                }
+                            }
+                        ]
                     }
                 },
-                "size": 3
+                "sort": [{"@timestamp": {"order": "desc"}}],
+                "size": 5
             }
             resp = requests.post(
                 f"{self.opensearch_url}/_search",

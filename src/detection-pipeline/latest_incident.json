@@ -1,16 +1,16 @@
 {
-  "incident_id": "INC-1792756269",
+  "incident_id": "INC-1792758373",
   "status": "AWAITING_APPROVAL",
-  "timestamp": "2026-10-23T11:51:17Z",
+  "timestamp": "2026-10-23T12:26:26Z",
   "diagnosis": {
     "culprit_service": "payment",
-    "root_cause": "Chaos flag 'paymentFailure' is active at variant '50%' (Fail payment service charge requests n%).",
-    "blast_radius": "Directly impacts service 'payment' and its upstream caller chain.",
+    "root_cause": "The payment service failed during execution of the 'oteldemo.PaymentService/Charge' gRPC method, returning error 'Payment request failed. Invalid token. demo.user_context.loyalty_level=gold'. This failure caused upstream caller checkout service's 'oteldemo.CheckoutService/PlaceOrder' RPC to fail with gRPC code 13 INTERNAL ('could not charge the card'), which in turn caused frontend request failures. This issue directly correlates with the active dynamic chaos flag 'paymentFailure' set to variant '50%', causing simulated token validation rejections.",
+    "blast_radius": "checkout, frontend",
     "evidence": {
       "metric_proof": "Symptom: HIGH_ERROR_RATE on payment",
-      "failing_trace_id": "6baa3168caaea5b21664ba47dfb655a6",
-      "failing_span": "resolveBoolean",
-      "log_excerpt": "No error logs found in lookback window",
+      "failing_trace_id": "a73734ad780a93c5eee51b50cee1bf84",
+      "failing_span": "oteldemo.PaymentService/Charge",
+      "log_excerpt": "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold",
       "container_inventory": [
         {
           "name": "payment",
@@ -34,7 +34,7 @@
     }
   },
   "remediation_plan": {
-    "summary": "Disable chaos flag 'paymentFailure' by setting defaultVariant to 'off' via Flagd REST API.",
+    "summary": "Disable the 'paymentFailure' feature flag to restore payment processing functionality.",
     "actions": [
       {
         "step": 1,
@@ -45,18 +45,18 @@
           "flag_name": "paymentFailure",
           "api_endpoint": "http://localhost:8080/feature/api/write"
         },
-        "description": "Disable chaos flag 'paymentFailure' by setting defaultVariant to 'off' via Flagd REST API."
+        "description": "Disable the paymentFailure chaos flag in Feature Flag service."
       },
       {
         "step": 2,
         "action_type": "VERIFY_RECOVERY",
         "target": "payment",
         "parameters": {
-          "metric_query": "sum(rate(http_requests_total{status=~'5..', service_name='payment'}[1m]))",
+          "metric_query": "sum(rate(grpc_server_handled_total{grpc_service=\"oteldemo.PaymentService\",grpc_code!=\"OK\"}[1m]))",
           "expected_value": 0,
           "evaluation_window_seconds": 30
         },
-        "description": "Verify payment 5xx error rate drops to 0% in Prometheus."
+        "description": "Verify error rate drops to 0% in Prometheus."
       }
     ]
   }

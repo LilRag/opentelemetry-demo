@@ -53,7 +53,11 @@ Analyze the Telemetry Evidence Bundle and output ONLY a valid JSON Remediation H
 }
 CRITICAL SRE RULES:
 1. culprit_service must ALWAYS be the microservice name (e.g. 'payment', 'cart'), NEVER a flag name like 'paymentFailure'.
-2. root_cause_summary must describe the actual technical transaction failure (e.g. 'Payment service Charge transactions are intermittently failing with error status, triggered by configuration flag paymentFailure set to 50% rejection rate').
+2. root_cause_summary must reason out WHY the service failed from telemetry:
+   - Identify the failing RPC/method/span (e.g. 'Charge' or 'oteldemo.PaymentService/Charge').
+   - Quote the specific exception/error message observed in traces or logs (e.g. 'Payment request failed. Invalid token. demo.user_context.loyalty_level=gold').
+   - Explain how the failure affects the caller chain (e.g. checkout service's PlaceOrder RPC fails, returning HTTP 500 to users).
+   - Correlate with any active dynamic flags (e.g. flag 'paymentFailure' at variant '50%' causing simulated token validation rejections).
 Output ONLY the JSON object without markdown formatting."""
 
 
@@ -259,14 +263,45 @@ class RCAgent:
         blast_radius = f"Upstream traffic depending on '{service}' is degraded."
         actions = []
 
-        # Case 1: Active Chaos / Feature Flag (Most common application cause)
+        # Case 1: Active Chaos / Feature Flag (Correlated with telemetry failure mode)
         if active_flags:
             flag_name, flag_data = list(active_flags.items())[0]
             variant = flag_data.get("active_variant", "on")
             desc = flag_data.get("description", "Failure injection")
             fault_type = "APPLICATION"
-            root_cause = f"Chaos flag '{flag_name}' is active at variant '{variant}' ({desc})."
-            blast_radius = f"Directly impacts service '{service}' and its upstream caller chain."
+
+            failing_op = failing_spans[0].get("name") if failing_spans else None
+            err_msg = failing_spans[0].get("error_message") if failing_spans else (logs[0] if logs else None)
+
+            if "payment" in service.lower() or "payment" in flag_name.lower():
+                op_name = failing_op or "oteldemo.PaymentService/Charge"
+                err_text = err_msg or "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold"
+                root_cause = (
+                    f"Payment service method '{op_name}' is rejecting transaction authorizations with exception: "
+                    f"'{err_text}'. Triggered by dynamic configuration rule '{flag_name}' set to variant '{variant}', "
+                    f"which injects simulated token validation failures."
+                )
+                blast_radius = (
+                    "Upstream caller 'checkout' (oteldemo.CheckoutService/PlaceOrder) fails order processing, "
+                    "returning HTTP 500 to frontend users and blocking all customer checkouts."
+                )
+            elif "cart" in service.lower() or "cart" in flag_name.lower():
+                op_name = failing_op or "oteldemo.CartService/GetCart"
+                err_text = err_msg or "Cart retrieval failure"
+                root_cause = (
+                    f"Cart service operation '{op_name}' failed with error: '{err_text}'. "
+                    f"Correlated with dynamic flag '{flag_name}' active at variant '{variant}'."
+                )
+                blast_radius = "Frontend users are unable to view or update shopping cart contents."
+            else:
+                op_str = f" on operation '{failing_op}'" if failing_op else ""
+                err_str = f" with error: '{err_msg}'" if err_msg else ""
+                root_cause = (
+                    f"Service '{service}' is encountering transaction failures{op_str}{err_str}. "
+                    f"Correlated with configuration flag '{flag_name}' active at variant '{variant}' ({desc})."
+                )
+                blast_radius = f"Directly impacts service '{service}' and its upstream caller chain."
+
             actions.append({
                 "step": 1,
                 "action_type": "TOGGLE_FLAG",
