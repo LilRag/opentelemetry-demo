@@ -5,10 +5,12 @@ import datetime
 import json
 import subprocess
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from config import config
+from queries import error_rate, latency
 
 try:
     import docker
@@ -24,16 +26,17 @@ class EvidenceCollector:
       1. Prometheus (Metrics: Error Rate, Latency)
       2. Jaeger v2/v3 (Distributed Traces: Root and child failing spans)
       3. OpenSearch (Logs: Stack traces correlated by trace_id/service)
-      4. Flagd (Chaos Flags: Active variants)
       5. Docker (Infrastructure: Container states, exit codes, OOM kills)
     """
 
     def __init__(self):
         self.prom_url = config.PROMETHEUS_URL
         self.jaeger_url = config.JAEGER_URL
-        self.flagd_url = config.FLAGD_READ_URL
         self.opensearch_url = self._resolve_opensearch_url()
-        self.docker_client = docker.from_env() if DOCKER_AVAILABLE else None
+        try:
+            self.docker_client = docker.from_env() if DOCKER_AVAILABLE else None
+        except Exception:
+            self.docker_client = None
 
     def _resolve_opensearch_url(self) -> str:
         """Finds active OpenSearch port (either configured or mapped by Docker)."""
@@ -57,7 +60,7 @@ class EvidenceCollector:
         """
         print(f"\n[*] Collecting evidence for service: '{service}' (Symptom: {symptom})...")
 
-        incident_id = f"INC-{int(time.time())}"
+        incident_id = "INC-" + uuid.uuid4().hex
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
         # 1. Gather Metrics Evidence from Prometheus
@@ -69,8 +72,6 @@ class EvidenceCollector:
         # 3. Gather Log Evidence from OpenSearch
         logs_evidence = self._collect_logs(service, trace_ids)
 
-        # 4. Gather Chaos Flag State from Flagd
-        active_flags = self._collect_chaos_flags()
 
         # 5. Gather Infrastructure State from Docker
         infra_evidence = self._collect_infra_state(service)
@@ -90,7 +91,6 @@ class EvidenceCollector:
                     "failing_spans": failing_spans
                 },
                 "logs": logs_evidence,
-                "active_chaos_flags": active_flags,
                 "infrastructure": infra_evidence
             }
         }
@@ -102,21 +102,15 @@ class EvidenceCollector:
     # 1. Prometheus Metrics Collection
     # ------------------------------------------------------------------
     def _collect_metrics(self, service: str) -> Dict[str, Any]:
-        result = {"error_rate": "0%", "p95_latency": "N/A"}
+        result = {"error_rate": None, "p95_latency": None}
         try:
-            q_err = (
-                f'sum(rate(http_requests_total{{status=~"5..", service_name="{service}"}}[1m])) '
-                f'/ sum(rate(http_requests_total{{service_name="{service}"}}[1m])) * 100'
-            )
+            q_err = error_rate(service)
             r = requests.get(f"{self.prom_url}/api/v1/query", params={"query": q_err}, timeout=4).json()
             items = r.get("data", {}).get("result", [])
             if items:
                 result["error_rate"] = f"{float(items[0]['value'][1]):.1f}%"
 
-            q_lat = (
-                f'histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket'
-                f'{{service_name="{service}"}}[1m])) by (le))'
-            )
+            q_lat = latency(service)
             r_lat = requests.get(f"{self.prom_url}/api/v1/query", params={"query": q_lat}, timeout=4).json()
             items_lat = r_lat.get("data", {}).get("result", [])
             if items_lat:
@@ -177,25 +171,31 @@ class EvidenceCollector:
     def _collect_logs(self, service: str, trace_ids: List[str]) -> List[str]:
         logs = []
         try:
-            should_clauses = [{"match": {"service.name": service}}]
+            should_clauses = [{"match": {"resource.service.name": service}},
+                              {"match": {"service.name": service}}]
             for tid in trace_ids[:3]:
-                should_clauses.append({"match": {"trace_id": tid}})
+                should_clauses.extend([{"match": {"traceId": tid}}, {"match": {"trace_id": tid}}])
 
             query_body = {
                 "query": {
                     "bool": {
                         "should": should_clauses,
-                        "must": [{"match": {"severity_text": "ERROR"}}]
+                        "minimum_should_match": 1,
+                        "must": [{"bool": {"should": [{"match": {"severity.text": "ERROR"}},
+                                                          {"match": {"severity_text": "ERROR"}}],
+                                            "minimum_should_match": 1}}]
                     }
                 },
                 "size": 3
             }
-            resp = requests.post(
+            response = requests.post(
                 f"{self.opensearch_url}/_search",
                 json=query_body,
                 headers={"Content-Type": "application/json"},
                 timeout=4
-            ).json()
+            )
+            response.raise_for_status()
+            resp = response.json()
 
             for hit in resp.get("hits", {}).get("hits", []):
                 source = hit.get("_source", {})
@@ -209,25 +209,7 @@ class EvidenceCollector:
         return logs
 
     # ------------------------------------------------------------------
-    # 4. Flagd Chaos Flags Collection
     # ------------------------------------------------------------------
-    def _collect_chaos_flags(self) -> Dict[str, Any]:
-        active_flags = {}
-        try:
-            resp = requests.get(self.flagd_url, timeout=4).json()
-            flags = resp.get("flags", {})
-            for name, data in flags.items():
-                variant = data.get("defaultVariant", "off")
-                if variant != "off":
-                    active_flags[name] = {
-                        "active_variant": variant,
-                        "description": data.get("description", "")
-                    }
-        except Exception as e:
-            active_flags["flagd_error"] = str(e)
-
-        return active_flags
-
     # ------------------------------------------------------------------
     # 5. Docker Infrastructure Health Collection
     # ------------------------------------------------------------------

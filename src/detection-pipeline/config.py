@@ -22,7 +22,10 @@ class Config:
     # Jaeger v2 query endpoint routed through the Envoy reverse proxy
     JAEGER_URL: str = os.getenv("JAEGER_URL", "http://localhost:8080/jaeger/ui/api/v3/traces")
     OPENSEARCH_URL: str = os.getenv("OPENSEARCH_URL", "")
-    FLAGD_READ_URL: str = os.getenv("FLAGD_READ_URL", "http://localhost:8080/feature/api/read")
+    ACTION_API_URL = os.getenv("ACTION_API_URL", "http://127.0.0.1:8020")
+    ACTION_AGENT_TOKEN = os.getenv("ACTION_AGENT_TOKEN", "")
+    ACTION_DRY_RUN = os.getenv("ACTION_DRY_RUN", "true").lower() == "true"
+    TOOL_CALL_LIMIT = 4
     DOCKER_CONTAINER_PREFIX: str = os.getenv("DOCKER_CONTAINER_PREFIX", "opentelemetry-demo")
 
     # ---------------------------------------------------------
@@ -46,7 +49,7 @@ class Config:
     # ---------------------------------------------------------
     # 3. Cognitive LLM Settings
     # ---------------------------------------------------------
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini/gemini-3.8-flash")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "") or GEMINI_API_KEY
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
@@ -67,7 +70,7 @@ class Config:
         print(f"  - Prometheus Endpoint : {cls.PROMETHEUS_URL}")
         print(f"  - Jaeger Endpoint     : {cls.JAEGER_URL}")
         print(f"  - OpenSearch Endpoint : {cls.OPENSEARCH_URL}")
-        print(f"  - Flagd Read Endpoint : {cls.FLAGD_READ_URL}")
+        print(f"  - Action API Endpoint : {cls.ACTION_API_URL}")
         print(f"  - Watchdog Interval   : Every {cls.WATCHDOG_INTERVAL_SECONDS}s")
         print(f"  - Error Threshold     : > {cls.ERROR_RATE_THRESHOLD_PERCENT}%")
         print(f"  - Latency Threshold   : > {cls.LATENCY_THRESHOLD_SECONDS}s")

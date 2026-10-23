@@ -8,6 +8,7 @@ import requests
 
 from config import config
 from evidence_collector import EvidenceCollector
+from queries import error_rate, latency as latency_query, MEMORY, QUEUE
 
 try:
     import docker
@@ -27,13 +28,17 @@ class Watchdog:
         self.collector = EvidenceCollector()
         self.on_incident_detected = on_incident_detected
         self.active_incident: Optional[Dict[str, Any]] = None
-        self.docker_client = docker.from_env() if DOCKER_AVAILABLE else None
+        try:
+            self.docker_client = docker.from_env() if DOCKER_AVAILABLE else None
+        except Exception:
+            self.docker_client = None
 
     def scan_once(self) -> Optional[Dict[str, Any]]:
         """
         Runs one evaluation pass across the 5 Universal Symptoms.
         Returns symptom event dict if an anomaly is detected, else None.
         """
+        self.monitoring_warnings = []
         # Symptom 1: High Error Rate (5xx > threshold)
         symptom = self._check_error_rates()
         if symptom:
@@ -61,6 +66,14 @@ class Watchdog:
 
         return None
 
+    def _query(self, query):
+        response = requests.get(f"{config.PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=3)
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status") != "success" or not result.get("data", {}).get("result"):
+            self.monitoring_warnings = getattr(self, "monitoring_warnings", []) + ["Query failed or has no samples: " + query]
+        return result
+
     def monitor_loop(self, poll_interval: Optional[int] = None):
         """
         Continuous monitoring loop. Runs every N seconds.
@@ -73,6 +86,8 @@ class Watchdog:
         while True:
             try:
                 symptom_event = self.scan_once()
+                for warning in getattr(self, "monitoring_warnings", []):
+                    print("[Telemetry warning] " + warning)
 
                 if symptom_event:
                     service = symptom_event["service"]
@@ -99,10 +114,9 @@ class Watchdog:
                         print(f"[-] Ongoing incident on '{service}' ({symptom_name}) still active. Waiting for resolution...")
                 else:
                     if self.active_incident:
-                        print("\n[+] Telemetry metrics returned to normal thresholds. Incident cleared.")
-                        self.active_incident = None
+                        print("\n[-] No threshold breach detected; recovery still requires explicit verification.")
                     else:
-                        print(f"[{time.strftime('%H:%M:%S')}] All services healthy (0% errors, normal latency).")
+                        print(f"[{time.strftime('%H:%M:%S')}] No configured threshold breach; unavailable telemetry is not proof of health.")
 
             except Exception as e:
                 print(f"[!] Watchdog check error: {e}")
@@ -113,12 +127,9 @@ class Watchdog:
     # Symptom 1: Error Rate Evaluation
     # ------------------------------------------------------------------
     def _check_error_rates(self) -> Optional[Dict[str, Any]]:
-        query = (
-            'sum by (service_name) (rate(http_requests_total{status=~"5.."}[1m])) '
-            '/ sum by (service_name) (rate(http_requests_total[1m])) * 100'
-        )
+        query = error_rate()
         try:
-            r = requests.get(f"{config.PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=3).json()
+            r = self._query(query)
             results = r.get("data", {}).get("result", [])
             for res in results:
                 rate = float(res.get("value", [0, 0])[1])
@@ -130,19 +141,16 @@ class Watchdog:
                         "value": f"{rate:.1f}% failure rate"
                     }
         except Exception:
-            pass
+            self.monitoring_warnings = getattr(self, "monitoring_warnings", []) + ["Monitoring source unavailable"]
         return None
 
     # ------------------------------------------------------------------
     # Symptom 2: Latency Evaluation
     # ------------------------------------------------------------------
     def _check_latency(self) -> Optional[Dict[str, Any]]:
-        query = (
-            'histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) '
-            'by (le, service_name))'
-        )
+        query = latency_query()
         try:
-            r = requests.get(f"{config.PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=3).json()
+            r = self._query(query)
             results = r.get("data", {}).get("result", [])
             for res in results:
                 latency = float(res.get("value", [0, 0])[1])
@@ -154,7 +162,7 @@ class Watchdog:
                         "value": f"{latency:.2f}s (p95)"
                     }
         except Exception:
-            pass
+            self.monitoring_warnings = getattr(self, "monitoring_warnings", []) + ["Monitoring source unavailable"]
         return None
 
     # ------------------------------------------------------------------
@@ -174,11 +182,12 @@ class Watchdog:
                     # Strictly match demo microservice names
                     if c.name in self.DEMO_SERVICES:
                         status = c.status
-                        if status not in ["running", "healthy"]:
+                        health = c.attrs.get("State", {}).get("Health", {}).get("Status")
+                        if status != "running" or health == "unhealthy":
                             return {
                                 "symptom": "CONTAINER_DOWN",
                                 "service": c.name,
-                                "value": f"Container status: {status}"
+                                "value": f"Container status: {status}, health: {health}"
                             }
             except Exception:
                 pass
@@ -203,34 +212,34 @@ class Watchdog:
     # Symptom 4: Resource Usage / Memory Leaks
     # ------------------------------------------------------------------
     def _check_resource_usage(self) -> Optional[Dict[str, Any]]:
-        query = 'container_memory_usage_bytes / container_spec_memory_limit_bytes'
+        query = MEMORY
         try:
-            r = requests.get(f"{config.PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=3).json()
+            r = self._query(query)
             results = r.get("data", {}).get("result", [])
             for res in results:
                 usage_ratio = float(res.get("value", [0, 0])[1])
-                container = res.get("metric", {}).get("name", "unknown")
-                if usage_ratio > config.MEMORY_THRESHOLD_RATIO:
+                container = res.get("metric", {}).get("container_name", "unknown")
+                if container in self.DEMO_SERVICES and usage_ratio > config.MEMORY_THRESHOLD_RATIO:
                     return {
                         "symptom": "RESOURCE_SPIKE",
                         "service": container,
                         "value": f"{usage_ratio * 100:.1f}% memory limit"
                     }
         except Exception:
-            pass
+            self.monitoring_warnings = getattr(self, "monitoring_warnings", []) + ["Monitoring source unavailable"]
         return None
 
     # ------------------------------------------------------------------
     # Symptom 5: Kafka Queue Lag
     # ------------------------------------------------------------------
     def _check_kafka_lag(self) -> Optional[Dict[str, Any]]:
-        query = 'sum(kafka_consumergroup_lag) by (consumergroup)'
+        query = QUEUE
         try:
-            r = requests.get(f"{config.PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=3).json()
+            r = self._query(query)
             results = r.get("data", {}).get("result", [])
             for res in results:
                 lag = float(res.get("value", [0, 0])[1])
-                group = res.get("metric", {}).get("consumergroup", "unknown")
+                group = res.get("metric", {}).get("group", "unknown")
                 if lag > config.KAFKA_LAG_THRESHOLD:
                     return {
                         "symptom": "PIPELINE_QUEUE_LAG",
@@ -238,7 +247,7 @@ class Watchdog:
                         "value": f"{int(lag)} unread records"
                     }
         except Exception:
-            pass
+            self.monitoring_warnings = getattr(self, "monitoring_warnings", []) + ["Monitoring source unavailable"]
         return None
 
 
@@ -253,4 +262,4 @@ if __name__ == "__main__":
     if anomaly:
         print(f"[!] Anomaly found: {anomaly}")
     else:
-        print("[+] System is currently 100% healthy. No incidents detected.")
+        print("[+] No configured breach detected; missing telemetry is not proof of health.")
